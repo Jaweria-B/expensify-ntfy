@@ -1,0 +1,13 @@
+name = "expensify-watcher"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+# Every minute. The free plan allows this.
+[triggers]
+crons = ["* * * * *"]
+
+# Remembers which issues you were already alerted about.
+# Replace the id with the one printed by: npx wrangler kv namespace create STATE
+[[kv_namespaces]]
+binding = "STATE"
+id = "PASTE_YOUR_KV_NAMESPACE_ID_HERE"
