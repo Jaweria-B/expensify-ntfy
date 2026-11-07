@@ -10,4 +10,4 @@ crons = ["* * * * *"]
 # Replace the id with the one printed by: npx wrangler kv namespace create STATE
 [[kv_namespaces]]
 binding = "STATE"
-id = "PASTE_YOUR_KV_NAMESPACE_ID_HERE"
+id = "2fb570e78887430b8c9ff2636861fbf4"
