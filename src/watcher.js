@@ -1,9 +1,29 @@
-// Checks Expensify/App and sends ntfy alerts. Kept free of Cloudflare-only imports so it can be tested with plain Node.
+// Checks Expensify/App and paid open-source bounties, and sends ntfy alerts. Kept free of Cloudflare-only imports so it
+// can be tested with plain Node.
 
 const REPO_OWNER = 'Expensify';
 const REPO_NAME = 'App';
 const HELP_WANTED = 'Help Wanted';
 const EXTERNAL = 'External';
+const BOUNTY = '💎 Bounty';
+
+// GitHub organizations whose Algora bounties have actually been paid ("💰 Rewarded") in 2026. Any repo can put a
+// "💎 Bounty" label on its own issues, so watching only proven payers keeps out label-only "bounties" that never pay.
+// Replace the list with a BOUNTY_ORGS secret (comma-separated, e.g. "calcom,activepieces") without editing code.
+const DEFAULT_BOUNTY_ORGS = [
+    'calcom',
+    'activepieces',
+    'CapSoftware',
+    'permitio',
+    'qdrant',
+    'archestra-ai',
+    'highlight',
+    'screenpipe',
+    'tursodatabase',
+    'golemcloud',
+    'projectdiscovery',
+    'tscircuit',
+];
 const ERROR_ALERT_INTERVAL_MS = 6 * 60 * 60 * 1000;
 // Durable Object storage reads and writes at most 128 keys per call.
 const STORAGE_BATCH_SIZE = 128;
@@ -22,7 +42,24 @@ const QUERY = `query($owner: String!, $name: String!) {
   }
 }`;
 
-async function fetchIssues(env) {
+// Open bounty issues across the watched organizations. The first few comments are read to find the amount the Algora
+// bot posts ("💎 $100 bounty").
+const BOUNTY_QUERY = `query($search: String!) {
+  search(query: $search, type: ISSUE, first: 50) {
+    nodes {
+      ... on Issue {
+        number title url
+        repository { nameWithOwner }
+        comments { totalCount }
+        firstComments: comments(first: 5) { nodes { author { login } body } }
+        labels(first: 30) { nodes { name } }
+        ${LABELED_EVENTS}
+      }
+    }
+  }
+}`;
+
+async function queryGitHub(env, query, variables) {
     if (!env.GITHUB_TOKEN) {
         throw new Error('GITHUB_TOKEN secret is not set');
     }
@@ -33,7 +70,7 @@ async function fetchIssues(env) {
             'Content-Type': 'application/json',
             'User-Agent': 'expensify-help-wanted-watcher',
         },
-        body: JSON.stringify({query: QUERY, variables: {owner: REPO_OWNER, name: REPO_NAME}}),
+        body: JSON.stringify({query, variables}),
     });
     if (!response.ok) {
         throw new Error(`GitHub returned HTTP ${response.status}`);
@@ -42,11 +79,35 @@ async function fetchIssues(env) {
     if (body.errors?.length) {
         throw new Error(`GitHub error: ${body.errors[0].message}`);
     }
-    const repository = body.data?.repository;
+    return body.data;
+}
+
+async function fetchIssues(env) {
+    const repository = (await queryGitHub(env, QUERY, {owner: REPO_OWNER, name: REPO_NAME}))?.repository;
     if (!repository) {
         throw new Error('GitHub returned no repository data');
     }
     return repository;
+}
+
+function getBountyOrgs(env) {
+    const fromSecret = (env.BOUNTY_ORGS ?? '')
+        .split(',')
+        .map((org) => org.trim())
+        .filter(Boolean);
+    return fromSecret.length > 0 ? fromSecret : DEFAULT_BOUNTY_ORGS;
+}
+
+/** Open bounty issues in the watched organizations, newest first. */
+async function fetchBounties(env) {
+    const orgs = getBountyOrgs(env);
+    const search = `is:issue is:open label:${JSON.stringify(BOUNTY)} sort:created-desc ${orgs.map((org) => `org:${org}`).join(' ')}`;
+    const result = (await queryGitHub(env, BOUNTY_QUERY, {search}))?.search;
+    if (!result) {
+        throw new Error('GitHub returned no bounty search data');
+    }
+    // A search result that is not an issue comes back as an empty object.
+    return {orgs, issues: result.nodes.filter((issue) => issue?.number !== undefined)};
 }
 
 async function notify(env, {title, message, url, priority, tags}) {
@@ -72,15 +133,43 @@ function getLabeledAt(issue, labelName) {
         .at(-1);
 }
 
+function getLabeledText(labeledAt) {
+    if (!labeledAt) {
+        return '';
+    }
+    return `, labeled ${Math.max(0, Math.round((Date.now() - Date.parse(labeledAt)) / 60000))} min ago`;
+}
+
 function helpWantedAlert(issue, labeledAt, titlePrefix = '') {
     const price = issue.title.match(/\[\$(\d[\d,]*)\]/)?.[1];
-    const minutes = labeledAt ? Math.max(0, Math.round((Date.now() - Date.parse(labeledAt)) / 60000)) : undefined;
     return {
         title: `${titlePrefix}${HELP_WANTED}: #${issue.number}${price ? ` ($${price})` : ''}`,
-        message: `${issue.title}\n${issue.comments.totalCount} comments so far${minutes === undefined ? '' : `, labeled ${minutes} min ago`}`,
+        message: `${issue.title}\n${issue.comments.totalCount} comments so far${getLabeledText(labeledAt)}`,
         url: issue.url,
         priority: 5,
         tags: ['rotating_light'],
+    };
+}
+
+/** The bounty amount, from a "$100" label or the Algora bot's comment, or undefined when neither shows one. */
+function getBountyAmount(issue) {
+    const amountLabel = issue.labels.nodes.find((label) => /^\$\d/.test(label.name))?.name;
+    if (amountLabel) {
+        return amountLabel;
+    }
+    const botComment = issue.firstComments.nodes.find((comment) => comment?.author?.login?.toLowerCase().includes('algora'));
+    const amount = botComment?.body.match(/\$\s?(\d[\d,]*)/)?.[1];
+    return amount ? `$${amount}` : undefined;
+}
+
+function bountyAlert(issue, labeledAt, titlePrefix = '') {
+    const amount = getBountyAmount(issue);
+    return {
+        title: `${titlePrefix}Bounty: ${issue.repository.nameWithOwner}#${issue.number}${amount ? ` (${amount})` : ''}`,
+        message: `${issue.title}\n${issue.comments.totalCount} comments so far${getLabeledText(labeledAt)}. Check the /attempt comments before starting.`,
+        url: issue.url,
+        priority: 4,
+        tags: ['gem'],
     };
 }
 
@@ -108,6 +197,36 @@ async function putMany(storage, entries) {
     for (let i = 0; i < entries.length; i += STORAGE_BATCH_SIZE) {
         await storage.put(Object.fromEntries(entries.slice(i, i + STORAGE_BATCH_SIZE)));
     }
+}
+
+/**
+ * The bounty alerts that are due. Bounties have their own start time, so turning the bounty watch on (or updating an
+ * existing watcher) never alerts about bounties that were already open.
+ */
+async function getDueBounties(storage, env, now) {
+    const {orgs, issues} = await fetchBounties(env);
+
+    let bountyInstalledAt = await storage.get('bountyInstalledAt');
+    if (bountyInstalledAt === undefined) {
+        await notify(env, {
+            title: 'Bounty watch is on',
+            message: `Watching ${orgs.length} organizations that have paid bounties before (${issues.length} bounties open now). You will be alerted about new ones from now on.`,
+            url: `https://github.com/search?q=${encodeURIComponent(`is:issue is:open label:"${BOUNTY}" ${orgs.map((org) => `org:${org}`).join(' ')}`)}&type=issues&s=created&o=desc`,
+            priority: 3,
+            tags: ['gem'],
+        });
+        bountyInstalledAt = now;
+        await storage.put('bountyInstalledAt', bountyInstalledAt);
+    }
+
+    const due = [];
+    for (const issue of issues) {
+        const labeledAt = getLabeledAt(issue, BOUNTY);
+        if (labeledAt && Date.parse(labeledAt) > bountyInstalledAt) {
+            due.push({key: `sent:bounty:${issue.repository.nameWithOwner}#${issue.number}:${labeledAt}`, labeledAt, alert: bountyAlert(issue, labeledAt)});
+        }
+    }
+    return due;
 }
 
 /**
@@ -159,11 +278,18 @@ async function runCheck(storage, env) {
         }
     }
 
+    // Bounties are checked separately, so a failed bounty search never blocks the Expensify alerts above.
+    const failures = [];
+    try {
+        due.push(...(await getDueBounties(storage, env, now)));
+    } catch (error) {
+        failures.push(new Error(`Bounty check failed: ${error.message}`));
+    }
+
     const alreadySent = await getMany(
         storage,
         due.map(({key}) => key),
     );
-    const failures = [];
     for (const {key, alert} of due.filter(({key}) => !alreadySent.has(key)).sort((a, b) => a.labeledAt.localeCompare(b.labeledAt))) {
         try {
             await notify(env, alert);
@@ -207,8 +333,27 @@ async function checkAndReport(storage, env) {
     }
 }
 
-/** Sends a test alert for the issue that most recently got Help Wanted. */
-async function sendTest(env) {
+/** Sends a test alert for the newest open bounty in the watched organizations. */
+async function sendBountyTest(env) {
+    const {orgs, issues} = await fetchBounties(env);
+    const newest = issues
+        .map((issue) => ({issue, labeledAt: getLabeledAt(issue, BOUNTY)}))
+        .sort((a, b) => (b.labeledAt ?? '').localeCompare(a.labeledAt ?? ''))
+        .at(0);
+    await notify(
+        env,
+        newest
+            ? bountyAlert(newest.issue, newest.labeledAt, '[TEST] ')
+            : {title: '[TEST] Bounty watch is working', message: `No open bounties in the ${orgs.length} watched organizations right now.`, priority: 3},
+    );
+}
+
+/** Sends a test alert for the issue that most recently got Help Wanted, or for the newest bounty when asked. */
+async function sendTest(env, type) {
+    if (type === 'bounty') {
+        await sendBountyTest(env);
+        return;
+    }
     const {helpWanted} = await fetchIssues(env);
     const newest = helpWanted.nodes
         .map((issue) => ({issue, labeledAt: getLabeledAt(issue, HELP_WANTED)}))

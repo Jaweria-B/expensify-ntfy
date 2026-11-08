@@ -1,5 +1,6 @@
-// Alerts your phone through ntfy when an Expensify/App issue gets the "Help Wanted" label, and sends a
-// quieter heads-up when an issue is marked "External" but is not open for proposals yet.
+// Alerts your phone through ntfy when an Expensify/App issue gets the "Help Wanted" label, sends a quieter heads-up
+// when an issue is marked "External" but is not open for proposals yet, and alerts about new Algora bounties from
+// organizations that have paid bounties before.
 // Runs every 10 minutes on Cloudflare's free Workers plan. The logic lives in watcher.js.
 
 import {DurableObject} from 'cloudflare:workers';
@@ -35,14 +36,15 @@ export default {
         await getWatcher(env).check();
     },
 
-    // Visiting /test?key=<TEST_KEY> sends a test alert for the newest Help Wanted issue.
+    // Visiting /test?key=<TEST_KEY> sends a test alert for the newest Help Wanted issue. Adding &type=bounty sends one for
+    // the newest bounty instead.
     async fetch(request, env) {
         const url = new URL(request.url);
         if (url.pathname !== '/test' || !env.TEST_KEY || url.searchParams.get('key') !== env.TEST_KEY) {
             return new Response('Not found', {status: 404});
         }
         try {
-            await sendTest(env);
+            await sendTest(env, url.searchParams.get('type'));
             return new Response('Test notification sent. Check your phone.');
         } catch (error) {
             return new Response(`Test failed: ${error.message}`, {status: 500});
