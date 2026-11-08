@@ -2,12 +2,16 @@ name = "expensify-watcher"
 main = "src/index.js"
 compatibility_date = "2026-10-01"
 
-# Every minute. The free plan allows this.
+# Every 10 minutes.
 [triggers]
-crons = ["* * * * *"]
+crons = ["*/10 * * * *"]
 
-# Remembers which issues you were already alerted about.
-# Replace the id with the one printed by: npx wrangler kv namespace create STATE
-[[kv_namespaces]]
-binding = "STATE"
-id = "2fb570e78887430b8c9ff2636861fbf4"
+# Remembers which alerts were already sent. Cloudflare creates it on the first deploy; there is nothing to set up.
+[[durable_objects.bindings]]
+name = "WATCHER"
+class_name = "Watcher"
+
+# The free plan only allows Durable Objects that store their data in SQLite.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Watcher"]

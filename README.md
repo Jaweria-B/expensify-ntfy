@@ -1,6 +1,6 @@
 # Expensify watcher on Cloudflare (free, 24/7)
 
-Every minute, this checks Expensify/App and sends your phone an ntfy alert:
+Every 10 minutes, this checks Expensify/App and sends your phone an ntfy alert:
 
 - **🚨 Help Wanted: #12345 ($250)** — the issue is open for proposals now.
 - **👀 Heads-up: #12345 is External** — likely to open soon. Prepare, but don't post yet.
@@ -25,18 +25,12 @@ Clone this repo (or download it as a ZIP from GitHub and unzip it), open a termi
    ```
    npx wrangler login
    ```
-2. **Create the storage** the watcher uses to remember what it already told you:
-   ```
-   npx wrangler kv namespace create STATE
-   ```
-   It prints an `id = "..."`. Open `wrangler.toml` and replace `PASTE_YOUR_KV_NAMESPACE_ID_HERE`
-   with that id.
-3. **Deploy:**
+2. **Deploy:**
    ```
    npx wrangler deploy
    ```
    It prints your Worker's address, like `https://expensify-watcher.YOUR-NAME.workers.dev`.
-4. **Add your secrets.** Each command asks you to paste a value.
+3. **Add your secrets.** Each command asks you to paste a value.
    ```
    npx wrangler secret put GITHUB_TOKEN
    npx wrangler secret put NTFY_TOPIC
@@ -46,7 +40,7 @@ Clone this repo (or download it as a ZIP from GitHub and unzip it), open a termi
    - `NTFY_TOPIC`: your ntfy topic name, exactly as in the app.
    - `TEST_KEY`: any random password you make up. It protects the test page.
 
-Within a minute or two your phone should show **"Expensify watcher is running"**. That's it.
+Within 10 minutes your phone should show **"Expensify watcher is running"**. That's it.
 
 ## Check it works
 
@@ -67,7 +61,16 @@ You should get a **[TEST]** alert for the newest Help Wanted issue.
 | Update after editing the code | `npx wrangler deploy` |
 | Remove it completely | `npx wrangler delete` |
 
+## How it decides what to send
+
+- Each alert is for one label being added at one time, for example "Help Wanted was added to #12345 at 10:42".
+  It is recorded the moment it is sent, so it is never sent twice. If a send fails, only that one alert is
+  tried again on the next check.
+- Only labels added after you installed the watcher count, so issues that were already open never alert.
+- If Expensify removes Help Wanted and adds it back later, that's a new label, so you get a new alert.
+- Its memory is a Cloudflare Durable Object. Cloudflare creates it on the first deploy; there's nothing to set up.
+
 ## Free plan limits
 
-It makes one small GitHub request a minute, well inside GitHub's limits. It writes to storage only
-when something changes, well inside Cloudflare's free limit of 1,000 writes a day.
+It makes one small GitHub request every 10 minutes, well inside GitHub's limits, and writes to its storage
+only when something new happens.
